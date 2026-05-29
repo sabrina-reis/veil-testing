@@ -8,7 +8,7 @@ veil module ReliableBroadcast
   as the `originator` (the node that initiated the broadcast) is honest.
 
   It proceeds in three phases:
-    - an initial phase, where the originator broadcasts `initial_msg`
+    - an pinitial phase, where the originator broadcasts `initial_msg`
     - an echo phase, where nodes broadcast an `echo` of the value they
       received
     - a vote phase, where nodes broadcast a `vote` for the value they've
