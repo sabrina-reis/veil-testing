@@ -1,0 +1,15 @@
+name = "veil-testing"
+version = "0.1.0"
+defaultTargets = ["veil-testing"]
+
+[[lean_lib]]
+name = "VeilTesting"
+
+[[lean_exe]]
+name = "veil-testing"
+root = "Main"
+
+[[require]]
+name = "veil"
+git = "https://github.com/verse-lab/veil.git"
+rev = "main"
