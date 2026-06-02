@@ -2,25 +2,52 @@ import Veil
 
 -- https://github.com/markyuen/tlaplus-to-ivy/blob/main/ivy/suzuki_kasami.ivy
 
+/-
+SabNote:
+The Suzuki-Kasami protocol aims to prevent threads from concurrently accessing
+shared resources, i.e. enforce mutual exclusion, by only allowing access to
+a process with a token.
+-/
+
 veil module SuzukiKasami
 
 
 type node
 type seq_t
+
+-- SabNote:
+-- init_node is an individual and unchangeable element of the node state.
 immutable individual init_node : node
 
+-- SabNote: declares that type seq_t is an instance of a total order with a min.
+-- seq_t is used to represent the token order.
 instantiate seq : TotalOrderWithMinimum seq_t
 
 -- State
 
 --- Nodes
+/-
+SabNote: Recall that relations are predicates over types.
+
+`n_have_privilege`: does this node currently have a token?
+`n_requesting`: is this node requesting a token>
+-/
 relation n_have_privilege : node → Prop
 relation n_requesting : node → Prop
+
+/-
+SabNote:
+This function seems to keep track of the token request number associated
+with two nodes, but is sometimes called with the same node in the arguments,
+e.g. `n_RN n n`
+-/
 function n_RN : node → node → seq_t
+
 -- the sequence number of the most recently granted request by `node`
 function n_token_seq : node → seq_t
 
 --- Requests
+-- SabNote: Seems to indicate if a request is granted
 relation reqs : node → node → seq_t → Prop
 
 --- Tokens
@@ -29,16 +56,39 @@ function t_LN : seq_t → node → seq_t
 relation t_q : seq_t → node → Prop
 
 --- Critical section
+-- SabNote: indicates if `node` has access to the critical section?
 relation crit : node → Prop
 
 #gen_state
 
+/-
+SabNote:
+
+Recall that actions are transitions between states.
+
+succ takes the token sequence and returns the next token by instantiating
+a new object of type TotalOrderWithMinimum and assuming that it is the next
+token in the sequence.
+
+This approach is slightly unclear to me. Why do we need to assume that k
+is the successor to n? Can't we define what it means to be the successor
+somehow?
+-/
 action succ (n : seq_t) = {
   let k : seq_t ← fresh
   assume seq.next n k;
   return k
 }
 
+/-
+Initially,
+  The initial node has the token.
+  No nodes are requesting access.
+  There are no requests in the system.
+  All possible requests marked as False (not granted), aside from the request
+  from the initial node.
+  No nodes have access to the critical section.
+-/
 after_init {
   n_have_privilege N := N = init_node;
   n_requesting N := False;
@@ -55,6 +105,17 @@ after_init {
   crit N := False
 }
 
+/-
+SabNote:
+If `n` is not already sending a request for a token, then:
+  Set the request status for `n` to True.
+  If `n` does not already have privilege, then:
+    Get the successor to the token value in `n_RN n n`.
+      (Unsure why the token value is stored in a function--a relation seems
+      more natural.)
+    Set n_RN n n to this successor.
+    Set the requests for all other nodes for this token to False.
+-/
 action request (n : node) = {
   require ¬ n_requesting n;
   n_requesting n := True;
@@ -64,6 +125,19 @@ action request (n : node) = {
     reqs N n (n_RN n n) := N ≠ n
 }
 
+/-
+SabNote:
+Conditions:
+  `m` must have sent a request to `n`
+If met:
+  Set the request number to the current request number `r` or the computed request
+  number, whichever is higher.
+  If `n` has privilege but does not need it and the requests are totally ordered, then:
+    Remove privilege from `n`
+    Compute the new token number as the succ of the token for the last granted
+    request.
+    Update the token state.
+-/
 -- node `n` receiving a request from `m` with sequence number `r`
 action rcv_request (n : node) (m : node) (r : seq_t) = {
   require reqs n m r;
@@ -76,6 +150,15 @@ action rcv_request (n : node) (m : node) (r : seq_t) = {
     t_q k N := t_q (n_token_seq n) N
 }
 
+/-
+SabNote:
+  Conditions:
+    `n` must have been granted access with the token `t`.
+    The token for the last request granted by `n` must be less than `t`.
+  If met:
+    Update the node state to grant privilege.
+    Mark the token number of the last granted request as `t`.
+-/
 action rcv_privilege (n: node) (t: seq_t) = {
   require t_for t n;
   require seq.lt (n_token_seq n) t;
@@ -83,6 +166,15 @@ action rcv_privilege (n: node) (t: seq_t) = {
   n_token_seq n := t
 }
 
+/-
+SabNote:
+  Conditions:
+    `n` must have privilege
+    `n` must be request access to the critical section.
+  If met:
+    Update the node state to reflect that `n` has access to the critical
+    section.
+-/
 action enter (n : node) = {
     require n_have_privilege n
     require n_requesting n
@@ -90,6 +182,24 @@ action enter (n : node) = {
     crit n := True
 }
 
+/-
+SabNote:
+  Conditions for exiting:
+    `n` must have access to the critical section.
+
+  If met:
+    Update the state of `n` to remove critical access and its request for
+    critical access.
+    (I am uncertain about the below since I don't understand the purpose of t_q
+    and t_LN.)
+    If another node is requesting access and its request number respects
+    the total order, then:
+      Remove privilege from `n`.
+      Compute a new token for the other node `m`.
+      Mark the request from `m` with token `k` as granted.
+      Update token state.
+
+-/
 action exit (n : node) = {
   require crit n;
   crit n := False;
