@@ -73,7 +73,7 @@ after_init {
 
 /-
 Conditions:
-To normally send a message, the receiver must not be in secret mode and the
+To normally send a message, the sender must not be in secret mode and the
 sender must not be sending any another message.
 
 If met:
@@ -81,7 +81,11 @@ Update the message state to reflect the normal message and update the
 process state to indicate that the sender is currently sending a message.
 -/
 action normal_send (sender : process) (receiver : process) (m : message) = {
-  require ¬ secret receiver ∧ ∀ R M, ¬ sending sender R M;
+  require ¬ secret sender
+  require ∀ R M, ¬ sending sender R M
+  require ∀ S R M, ¬ normal_msg S R M
+  require ∀ S R M, ¬ eager_msg S R M
+
   normal_msg sender receiver m := True;
   delivered sender receiver m := False;
   sending sender receiver m := True;
@@ -95,24 +99,32 @@ If met:
   Mark the message as delivered.
   Mark the sender as no longer sending this message.
 -/
-action normal_delivery (sender : process) (receiver : process) (m : message) = {
+action normal_delivery (sender : process) (receiver : process) (m: message) = {
   require normal_msg sender receiver m;
+  require sending sender receiver m;
+  require ∀ M, ¬ sending sender receiver M;
+  require ¬ delivered sender receiver m;
+
   sending sender receiver m := False;
   delivered sender receiver m := True;
 }
 
 /-
 Conditions:
-To eagerly send a message, the sender must already be sending a message.
+To eagerly send a message, the sender must already be sending a normal message.
 
 If met:
 Initialize an eager message and put the receiver into secret mode.
 -/
 action eager_send (sender : process) (receiver : process) (m : message) = {
+  require ¬ secret sender;
+  require ∃ R M, normal_msg sender R M;
   require ∃ R M, sending sender R M;
+  require ∃ R M, ¬ delivered sender R M;
+
   eager_msg sender receiver m := True;
+  sending sender receiver m := True;
   delivered sender receiver m := False;
-  secret receiver := True;
   -- receiver could already be in secret mode; is that a problem?
 
 }
@@ -120,15 +132,25 @@ action eager_send (sender : process) (receiver : process) (m : message) = {
 /-
 Conditions:
 To deliver an eager message, a corresponding eager message must already exist.
+There must also be a normal message sent from the same sender.
+The normal message must no longer be sending and must already be delivered.
 
 If met:
   Mark the message as delivered.
   Mark the sender as no longer sending this message.
 -/
 action eager_delivery (sender : process) (receiver : process) (m : message) = {
+  require ¬ secret sender;
+  require ∃ R M, normal_msg sender R M;
+  require ∃ R M, ¬ sending sender R M;
+  require ∃ R M, delivered sender R M;
   require eager_msg sender receiver m;
+  require sending sender receiver m;
+  require ¬ delivered sender receiver m;
+
   sending sender receiver m := False;
   delivered sender receiver m := True;
+  secret receiver := True; -- should I put this in the send or deliver?
 }
 
 /-
@@ -170,20 +192,35 @@ action you_can_tell (sender : process) (secret_receiver : process) (msg_receiver
 From Cykas paper:
 The safety property we wish to ensure is causal delivery, i.e., messages are
 never delivered in an order that violates the causal order.
+That is, if m is sent before m′ and m and m′ are received and delivered at
+the same process, then the delivery of m precedes the delivery of m′.
 
+In other words, if we are sending our normal message, then we are not sending
+our eager message. Additionally, if our normal message has not been delivered,
+then our eager message has not been delivered.
+-/
+
+safety [causal_delivery]
+∀ (sender receiver1 receiver2 : process) (m1 m2 : message),
+  (normal_msg sender receiver1 m1) ∧ (eager_msg sender receiver2 m2) →
+    (sending sender receiver1 m1 → ¬ sending sender receiver2 m2) ∧
+    (¬ delivered sender receiver1 m1) → (¬ delivered sender receiver2 m2)
+
+
+/- From Cykas paper:
 The liveness property we wish to ensure is that, assuming a reliable network,
 all messages will eventually be delivered.
+
+I don't know that we have a way to verify liveness in Veil yet?
 -/
-safety [causal_delivery]
-  sorry
 
-/- If a message is delivered, it is the message that was initially proposed by the originator. -/
-
-invariant[reliable_delivery]
-  sorry
+-- invariant[reliable_delivery]
+--   ∀ (sender receiver : process) (m: message),
+--     (normal_msg sender receiver m) ∨ (eager_msg sender receiver m) →
+--     (eventually) delivered sender receiver m
 
 #gen_spec
-
+set_option veil.printCounterexamples true
 #time #check_invariants
 
 end Cykas
