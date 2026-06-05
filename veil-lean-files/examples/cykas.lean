@@ -38,16 +38,22 @@ relation ack_msg (sender : process) (receiver : process) (m : message)
 
 /-
 State of the processes
-secret: is `p` in secret mode?
+secret: is `p` in secret mode until the message `m` from `sender` to `receiver`
+is ACKed?
 
-sending: is `p` currently sending a message?
+sent: is `p` currently sent a message?
 
 delivered: did `p` deliver the message `m` to `receiver`?
--/
-relation secret (p : process)
-relation sending (p : process) (receiver : process) (m : message)
-relation delivered (p : process) (receiver : process) (m : message)
 
+sent_before : was `m1` sent before `m2`?
+
+delivered_before : was `m1` delivered before `m2`?
+-/
+relation secret (p : process) (sender : process) (receiver : process) (m : message)
+relation sent (p : process) (receiver : process) (m : message)
+relation delivered (p : process) (receiver : process) (m : message)
+relation sent_before (sender : process) (receiver : process) (m1 : message) (m2 : message)
+relation delivered_before (sender : process) (receiver : process) (m1 : message) (m2 : message)
 /-
 Recall, gen_state calls assemble_state, which packages all relation predicates
 into a single `State` type.
@@ -57,135 +63,135 @@ into a single `State` type.
 
 /-
 In the initial state:
-No processes should be in secret mode or sending any messages
+No processes should be in secret mode or sent any messages
 No process should have delivered any messages.
 There should be no eager, normal, ACK, or YouCanTell messages.
 -/
 after_init {
-  secret P := False;
-  sending P R M := False;
+  secret P S R M := False;
+  sent P R M := False;
   delivered P R M := False;
 
   eager_msg S R M := False;
   normal_msg S R M := False;
   ack_msg S R M := False;
+  sent_before S R M N := False
+  delivered_before S R M N := False
 }
 
 /-
 Conditions:
-To normally send a message, the sender must not be in secret mode and the
-sender must not be sending any another message.
+  sender must not be in secret mode
+  if another message from this sender exists, it must already have been ACKed.
+  If another from this sender exists and has not been ACKed, we would need to send
+  an eager message.
 
 If met:
-Update the message state to reflect the normal message and update the
-process state to indicate that the sender is currently sending a message.
+  Initialize the normal message
+  Mark message as sent.
+  If any other messages have been sent from this sender and receiver, ensure
+  that they are causally ordered.
 -/
 action normal_send (sender : process) (receiver : process) (m : message) = {
-  require ¬ secret sender
-  require ∀ R M, ¬ sending sender R M
-  require ∀ S R M, ¬ normal_msg S R M
-  require ∀ S R M, ¬ eager_msg S R M
+  require ¬ ∃ S R M, secret sender S R M
+  require ¬ ∃ R M, normal_msg sender R M ∧ ¬ ack_msg sender R M
+  require ¬ ∃ R M, eager_msg sender R M ∧ ¬ ack_msg sender R M
 
   normal_msg sender receiver m := True;
-  delivered sender receiver m := False;
-  sending sender receiver m := True;
+  sent sender receiver m := True;
+  ∀ M, sent sender receiver M → sent_before sender receiver M m := True
 }
 
 /-
 Conditions:
-To deliver a normal message, a corresponding normal message must already exist.
+  A corresponding normal message must already exist.
+  This message must be sent and not delivered.
+  (TODO: does it have to not be delivered?)
 
 If met:
   Mark the message as delivered.
-  Mark the sender as no longer sending this message.
 -/
 action normal_delivery (sender : process) (receiver : process) (m: message) = {
   require normal_msg sender receiver m;
-  require sending sender receiver m;
-  require ∀ M, ¬ sending sender receiver M;
+  require sent sender receiver m;
   require ¬ delivered sender receiver m;
 
-  sending sender receiver m := False;
+
   delivered sender receiver m := True;
+  ∀ M, delivered sender receiver M → delivered_before sender receiver M m := True
 }
 
 /-
 Conditions:
-To eagerly send a message, the sender must already be sending a normal message.
+To ACK a message,
+  A corresponding message must already exist.
+  The message must have been delivered.
 
 If met:
-Initialize an eager message and put the receiver into secret mode.
+  Mark the message as acknowledged.
+-/
+action ack (sender : process) (receiver : process) (m : message) = {
+  require eager_msg sender receiver m ∨ normal_msg sender receiver m;
+  require delivered sender receiver m;
+
+  ack_msg sender receiver m := True;
+}
+
+/-
+Conditions:
+To eagerly send a message:
+  The sender must already have sent a normal message which has not yet been ACKed.
+  The sender must not be in secret mode.
+
+If met:
+  Initialize an eager message and send it.
+  If any other messages have been sent from this sender to the receiver, ensure
+  that they are causually sent.
 -/
 action eager_send (sender : process) (receiver : process) (m : message) = {
-  require ¬ secret sender;
-  require ∃ R M, normal_msg sender R M;
-  require ∃ R M, sending sender R M;
-  require ∃ R M, ¬ delivered sender R M;
+  require ¬ ∃ S R M secret sender S R M;
+  require ∃ R M, normal_msg sender R M ∧ ¬ ack_msg sender R M
 
   eager_msg sender receiver m := True;
-  sending sender receiver m := True;
-  delivered sender receiver m := False;
-  -- receiver could already be in secret mode; is that a problem?
-
+  sent sender receiver m := True;
+  ∀ M, sent sender receiver M → sent_before sender receiver M m := True
 }
 
 /-
 Conditions:
 To deliver an eager message, a corresponding eager message must already exist.
 There must also be a normal message sent from the same sender.
-The normal message must no longer be sending and must already be delivered.
+The normal message must no longer be sent and must already be delivered.
 
 If met:
   Mark the message as delivered.
-  Mark the sender as no longer sending this message.
+  Mark the sender as no longer sent this message.
 -/
-action eager_delivery (sender : process) (receiver : process) (m : message) = {
-  require ¬ secret sender;
-  require ∃ R M, normal_msg sender R M;
-  require ∃ R M, ¬ sending sender R M;
-  require ∃ R M, delivered sender R M;
-  require eager_msg sender receiver m;
-  require sending sender receiver m;
-  require ¬ delivered sender receiver m;
+action eager_delivery (sender : process) (secret_receiver : process) (msg_receiver) (em : message) (nm : message) = {
+  require eager_msg sender secret_receiver em;
+  require sent sender secret_receiver em;
+  require ¬delivered sender secret_receiver em;
+  require ∃ R, normal_msg msg_sender R nm
 
-  sending sender receiver m := False;
-  delivered sender receiver m := True;
-  secret receiver := True; -- should I put this in the send or deliver?
+  delivered sender secret_receiver em := True;
+  secret receiver sender msg_receiver nm := True;
+  ∀ M, delivered sender secret_receiver M → delivered sender secret_receiver M m := True
 }
 
-/-
-Conditions:
-To ACK an eager message,
-  A corresponding eager message must already exist.
-  The sender must no longer be sending the eager message.
-  This eager message must already have been delivered.
-
-If met:
-  Mark the message as delivered.
-  Mark the sender as no longer sending this message.
--/
-action ack (sender : process) (receiver : process) (m : message) = {
-  require eager_msg sender receiver m;
-  require ¬ sending sender receiver m;
-  require delivered sender receiver m;
-
-  ack_msg sender receiver m := True;
-}
-
--- ack_msg: has the message `m` from `sender` to `receiver` been acknowledged?
 
 /-
 Conditions:
 To tell a process in secret mode that they can tell,
-  The eager message that put the process in secret mode must have been ACKed.
+  The message that put the process in secret mode must have been ACKed.
+  The process must have been in secret mode for the message.
 
 If met:
   Take the secret receiver out of secret mode.
-  (TODO: I think this is enough to allow them to perform their send transition?)
 -/
-action you_can_tell (sender : process) (secret_receiver : process) (msg_receiver : process) (m : message) = {
-  require ack_msg sender msg_receiver m;
-  secret secret_receiver := False;
+action you_can_tell (secret_receiver : process) (msg_sender : process) (msg_receiver : process) (m : message) = {
+  require ack_msg msg_sender msg_receiver m;
+  require secret secret_receiver msg_sender msg_receiver m;
+  secret secret_receiver msg_sender msg_receiver m := False;
 }
 
 /-
@@ -194,33 +200,22 @@ The safety property we wish to ensure is causal delivery, i.e., messages are
 never delivered in an order that violates the causal order.
 That is, if m is sent before m′ and m and m′ are received and delivered at
 the same process, then the delivery of m precedes the delivery of m′.
-
-In other words, if we are sending our normal message, then we are not sending
-our eager message. Additionally, if our normal message has not been delivered,
-then our eager message has not been delivered.
 -/
 
 safety [causal_delivery]
-∀ (sender receiver1 receiver2 : process) (m1 m2 : message),
-  (normal_msg sender receiver1 m1) ∧ (eager_msg sender receiver2 m2) →
-    (sending sender receiver1 m1 → ¬ sending sender receiver2 m2) ∧
-    (¬ delivered sender receiver1 m1) → (¬ delivered sender receiver2 m2)
-
-
-/- From Cykas paper:
-The liveness property we wish to ensure is that, assuming a reliable network,
-all messages will eventually be delivered.
-
-I don't know that we have a way to verify liveness in Veil yet?
--/
-
--- invariant[reliable_delivery]
---   ∀ (sender receiver : process) (m: message),
---     (normal_msg sender receiver m) ∨ (eager_msg sender receiver m) →
---     (eventually) delivered sender receiver m
+∀ (sender receiver : process) (m1 m2 : message),
+  (normal_msg sender receiver m1) ∧ (eager_msg sender receiver m2) ∧
+  (sent sender receiver m1) ∧ (sent sender receiver m2) ∧
+  (delivered sender receiver m1) ∧ (delivered sender receiver m2) →
+  sent_before sender receiver m1 m2 ∧
+  delivered_before sender receiver m1 m2
 
 #gen_spec
+
 set_option veil.printCounterexamples true
+set_option veil.smt.model.minimize true
+set_option veil.vc_gen "transition"
 #time #check_invariants
+
 
 end Cykas
