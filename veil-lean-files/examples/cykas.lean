@@ -54,6 +54,7 @@ relation sent (p : process) (receiver : process) (m : message)
 relation delivered (p : process) (receiver : process) (m : message)
 relation sent_before (sender : process) (receiver : process) (m1 : message) (m2 : message)
 relation delivered_before (sender : process) (receiver : process) (m1 : message) (m2 : message)
+
 /-
 Recall, gen_state calls assemble_state, which packages all relation predicates
 into a single `State` type.
@@ -71,12 +72,12 @@ after_init {
   secret P S R M := False;
   sent P R M := False;
   delivered P R M := False;
+  sent_before S R M N := False;
+  delivered_before S R M N := False;
 
   eager_msg S R M := False;
   normal_msg S R M := False;
   ack_msg S R M := False;
-  sent_before S R M N := False
-  delivered_before S R M N := False
 }
 
 /-
@@ -87,38 +88,52 @@ Conditions:
   an eager message.
 
 If met:
-  Initialize the normal message
-  Mark message as sent.
-  If any other messages have been sent from this sender and receiver, ensure
-  that they are causally ordered.
+  Instantiate the normal message.
+  Mark the normal message as sent.
+  Update the sent_before relation to track every message M from this sender
+  and receiver that was sent before m.
+  Update the delivered_before relation to track every message M from this sender
+  and receiver that was delivered before m.
 -/
 action normal_send (sender : process) (receiver : process) (m : message) = {
-  require ¬ ∃ S R M, secret sender S R M
-  require ¬ ∃ R M, normal_msg sender R M ∧ ¬ ack_msg sender R M
-  require ¬ ∃ R M, eager_msg sender R M ∧ ¬ ack_msg sender R M
+  require ¬ (∃ S R M, secret sender S R M);
+  -- if we are sending a normal message, no other messages from this sender
+  -- should be in progress
+  require ¬ (∃ R M, normal_msg sender R M ∧ ¬ delivered sender R M);
+  require ¬ (∃ R M, normal_msg sender R M ∧ ¬ ack_msg sender R M);
+  require ¬ (∃ R M, eager_msg sender R M ∧ ¬ ack_msg sender R M);
+  require ¬ (∃ R M, eager_msg sender R M ∧ ¬ delivered sender R M);
 
   normal_msg sender receiver m := True;
   sent sender receiver m := True;
-  ∀ M, sent sender receiver M → sent_before sender receiver M m := True
+  -- why is this neccessary for causal delivery if false by default?
+  delivered sender receiver m := False;
+  ack_msg sender receiver m := False;
+  sent_before sender receiver M m := sent sender receiver M;
 }
 
 /-
 Conditions:
   A corresponding normal message must already exist.
   This message must be sent and not delivered.
-  (TODO: does it have to not be delivered?)
 
 If met:
   Mark the message as delivered.
+  Update the delivered_before relation to track every message M from this sender
+  and receiver that was delivered before m.
 -/
-action normal_delivery (sender : process) (receiver : process) (m: message) = {
+action normal_delivery (sender : process) (receiver : process) (m : message) = {
   require normal_msg sender receiver m;
   require sent sender receiver m;
   require ¬ delivered sender receiver m;
-
+  require ¬ (∃ S R M, secret sender S R M);
+  require ¬ (∃ R M, normal_msg sender R M ∧ ¬ delivered sender R M);
+  require ¬ (∃ R M, normal_msg sender R M ∧ ¬ ack_msg sender R M);
+  require ¬ (∃ R M, eager_msg sender R M ∧ ¬ ack_msg sender R M);
+  require ¬ (∃ R M, eager_msg sender R M ∧ ¬ delivered sender R M);
 
   delivered sender receiver m := True;
-  ∀ M, delivered sender receiver M → delivered_before sender receiver M m := True
+  delivered_before sender receiver M m := delivered sender receiver M;
 }
 
 /-
@@ -149,12 +164,12 @@ If met:
   that they are causually sent.
 -/
 action eager_send (sender : process) (receiver : process) (m : message) = {
-  require ¬ ∃ S R M secret sender S R M;
-  require ∃ R M, normal_msg sender R M ∧ ¬ ack_msg sender R M
+  require ¬ ∃ S R M, secret sender S R M;
+  require ∃ R M, normal_msg sender R M ∧ ¬ ack_msg sender R M;
 
   eager_msg sender receiver m := True;
   sent sender receiver m := True;
-  ∀ M, sent sender receiver M → sent_before sender receiver M m := True
+  sent_before sender receiver M m := sent sender receiver M
 }
 
 /-
@@ -167,15 +182,15 @@ If met:
   Mark the message as delivered.
   Mark the sender as no longer sent this message.
 -/
-action eager_delivery (sender : process) (secret_receiver : process) (msg_receiver) (em : message) (nm : message) = {
+action eager_delivery (sender : process) (secret_receiver : process) (msg_receiver : process) (em : message) (nm : message) = {
   require eager_msg sender secret_receiver em;
   require sent sender secret_receiver em;
-  require ¬delivered sender secret_receiver em;
-  require ∃ R, normal_msg msg_sender R nm
+  require ¬ delivered sender secret_receiver em;
+  require ∃ R, normal_msg sender R nm;
 
   delivered sender secret_receiver em := True;
-  secret receiver sender msg_receiver nm := True;
-  ∀ M, delivered sender secret_receiver M → delivered sender secret_receiver M m := True
+  secret secret_receiver sender msg_receiver nm := True;
+  delivered_before sender secret_receiver M em := delivered sender secret_receiver M
 }
 
 
@@ -196,19 +211,75 @@ action you_can_tell (secret_receiver : process) (msg_sender : process) (msg_rece
 
 /-
 From Cykas paper:
-The safety property we wish to ensure is causal delivery, i.e., messages are
+"The safety property we wish to ensure is causal delivery, i.e., messages are
 never delivered in an order that violates the causal order.
 That is, if m is sent before m′ and m and m′ are received and delivered at
-the same process, then the delivery of m precedes the delivery of m′.
--/
+the same process, then the delivery of m precedes the delivery of m′."
 
-safety [causal_delivery]
+Assumptions:
+A normal message from the same sender and receiver exists.
+An eager message from the same sender and receiver exists.
+The normal message was sent.
+The eager message was sent.
+The normal message was delivered.
+The eager message was delivered.
+The normal message was sent before the eager message.
+
+Conclusion:
+The normal message was delivered before the eager message.
+-/
+safety [causal_delivery_eager]
 ∀ (sender receiver : process) (m1 m2 : message),
   (normal_msg sender receiver m1) ∧ (eager_msg sender receiver m2) ∧
   (sent sender receiver m1) ∧ (sent sender receiver m2) ∧
   (delivered sender receiver m1) ∧ (delivered sender receiver m2) →
-  sent_before sender receiver m1 m2 ∧
+  (sent_before sender receiver m1 m2) ∧
   delivered_before sender receiver m1 m2
+
+/-
+From Cykas paper:
+"The safety property we wish to ensure is causal delivery, i.e., messages are
+never delivered in an order that violates the causal order.
+That is, if m is sent before m′ and m and m′ are received and delivered at
+the same process, then the delivery of m precedes the delivery of m′."
+
+Assumptions:
+A normal message from the same sender and receiver exists.
+Another normal message from the same sender and receiver exists.
+The first message was sent.
+The second  message was sent.
+The first message was delivered.
+The second message was delivered.
+The first message was sent before the second message.
+
+Conclusion:
+The first message was delivered before the second message.
+-/
+-- safety [causal_delivery_normal]
+-- ∀ (sender receiver : process) (m1 m2 : message),
+--   (normal_msg sender receiver m1) ∧ (normal_msg sender receiver m2) ∧
+--   (sent sender receiver m1) ∧ (sent sender receiver m2) ∧
+--   (delivered sender receiver m1) ∧ (delivered sender receiver m2) ∧
+--   (sent_before sender receiver m1 m2) →
+--   delivered_before sender receiver m1 m2
+
+/-
+When we send a normal message, all other messages from the sender have been
+ACKed and delivered. Otherwise, we would be sending an eager message.
+
+This invariant gets normal_delivery to pass casual_delivery.
+-/
+-- invariant [normal_send_no_other_msgs_in_progress]
+--   (normal_msg S R M ∧ sent S R M ∧ ¬ delivered S R M ∧ ¬ ack_msg S R M) ->
+--   ¬ (∃ A B, normal_msg S A B ∧ ¬ delivered S A B) ∧
+--   ¬ (∃ A B, normal_msg S A B ∧ ¬ ack_msg S A B) ∧
+--   ¬ (∃ A B, eager_msg S A B ∧ ¬ delivered S A B) ∧
+--   ¬ (∃ A B, eager_msg S A B ∧ ¬ ack_msg S A B)
+
+
+invariant [ack_implies_delivered] ack_msg S R M → delivered S R M
+
+invariant [delivered_implies_send] delivered S R M → sent S R M
 
 #gen_spec
 
